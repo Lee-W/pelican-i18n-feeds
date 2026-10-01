@@ -1,6 +1,6 @@
 [project]
 name = "pelican-i18n-feeds"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pelican plugin that writes Atom feeds listing the articles of every i18n_subsites language."
 readme = "README.md"
 requires-python = ">=3.11"
