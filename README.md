@@ -102,7 +102,7 @@ Notes on `feed_settings()`:
 
 - Call `globals().update(...)` **after** `from pelicanconf import *`: it replaces the module's `FEED_ALL_ATOM`, `FEED_ATOM`, `CATEGORY_FEED_ATOM`, `FEED_ALL_LANGUAGES_ATOM`, `CATEGORY_FEED_ALL_LANGUAGES_ATOM`, `FEED_LINK_TITLES`, `FEED_EXTRA_LINKS`, `I18N_FEEDS_URLS`, `I18N_FEEDS_ALL_LANGUAGES_URL`, `I18N_SUBSITES` and, with `social=`, `SOCIAL`. Set any of them again after the call to override it.
 - In each subsite entry, it **replaces** the subsite's own `FEED_DOMAIN`, `FEED_ATOM`, `CATEGORY_FEED_ATOM`, `FEED_LINK_TITLES`, `FEED_EXTRA_LINKS` (and `SOCIAL` with `social=`): they are what the layout is made of. Change `I18N_SUBSITES[lang][...]` after the call if one subsite needs something else.
-- It returns a new `I18N_SUBSITES` built from deep copies of your entries, so the result and the `I18N_SUBSITES` you passed in share no mutable objects.
+- It returns a new `I18N_SUBSITES` built from deep copies of your entries, so the result and the `I18N_SUBSITES` you passed in share no mutable objects. Every value in a subsite entry therefore has to be deep-copyable: a lock, a module or a generator raises `TypeError` (plain settings, functions, classes and compiled regexes are fine).
 - It raises `TypeError` when `subsites`, an entry of it, `language_names` or `all_languages_labels` is not a mapping, and `ValueError` when `default_lang` is also a subsite or a `SOCIAL` entry is not a `(name, link)` pair.
 - You can also assign the keys you want one by one instead of `globals().update(...)`.
 
