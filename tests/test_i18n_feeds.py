@@ -36,6 +36,8 @@ LABELS = {
 }
 SUBSITES = {"ja": {"SITENAME": "Test JA"}, "en": {"SITENAME": "Test EN"}}
 SOCIAL = (("GitHub", "https://github.com/example"), ("RSS", f"{SITEURL}/old"))
+# An _build override value that removes the setting instead.
+UNSET = object()
 
 
 def _feed_settings(subsites: dict[str, Any] = SUBSITES) -> dict[str, Any]:
@@ -100,6 +102,7 @@ def _build(
         **_feed_settings(),
         **(overrides or {}),
     }
+    settings = {key: value for key, value in settings.items() if value is not UNSET}
     result = subprocess.run(
         [
             sys.executable,
@@ -122,7 +125,19 @@ def _build(
     log = result.stdout + result.stderr
     assert result.returncode == 0, log
     assert ("WARNING" in log) is expect_warning, log
+    _assert_no_dead_links(output)
     return output, log
+
+
+def _assert_no_dead_links(output: Path) -> None:
+    """Every entry of every feed links to a page the build wrote."""
+    for path in output.rglob("*.atom.xml"):
+        for link in _read_feed(path)["links"]:
+            assert link.startswith(f"{SITEURL}/"), (path, link)
+            page = output / link.removeprefix(f"{SITEURL}/")
+            if link.endswith("/"):
+                page = page / "index.html"
+            assert page.is_file(), (path.relative_to(output).as_posix(), link)
 
 
 def _read_feed(path: Path) -> dict[str, Any]:
@@ -148,9 +163,11 @@ def _read_feed(path: Path) -> dict[str, Any]:
         if link.get("rel") == "self"
     )
     feed_id = root.find("atom:id", ATOM)
-    assert feed_id is not None
+    title = root.find("atom:title", ATOM)
+    assert feed_id is not None and title is not None
     return {
         "id": feed_id.text,
+        "title": title.text,
         "self": self_link,
         "entries": entries,
         "links": [entry["link"] for entry in entries],
@@ -256,6 +273,17 @@ def test_three_languages_split_feeds_with_every_article_in_feeds(
     en_entry = feeds["feeds/all.atom.xml"]["entries"][4]
     assert en_entry == feeds["en/feeds/all.atom.xml"]["entries"][1]
 
+    # Pelican's title: the site name, " - <category>" for category feeds.
+    def title(path: str) -> str:
+        lang, _, name = path.partition("/feeds/")
+        site = SUBSITES[lang]["SITENAME"] if lang in SUBSITES else "Test"
+        stem = name.removesuffix(".atom.xml")
+        return site if stem == "all" else f"{site} - {stem.capitalize()}"
+
+    assert {path: feed["title"] for path, feed in feeds.items()} == {
+        path: title(path if "/feeds/" in path else f"zh-tw/{path}") for path in EXPECTED
+    }
+
 
 def test_each_site_links_its_own_feeds_in_head(tmp_path: Path) -> None:
     output, _ = _build(tmp_path, _every_kind_of_post)
@@ -343,19 +371,62 @@ def test_all_language_feeds_keep_the_newest_items_up_to_the_limit(
         )
 
 
-def test_hidden_untranslated_articles_are_reported(tmp_path: Path) -> None:
+@pytest.mark.parametrize("policy", ["hide", UNSET])
+def test_hidden_untranslated_articles_are_left_out_and_reported(
+    tmp_path: Path, policy: object
+) -> None:
+    # Unset means i18n_subsites' default, "hide".
     output, log = _build(
         tmp_path,
         _every_kind_of_post,
-        {"I18N_UNTRANSLATED_ARTICLES": "hide"},
+        {"I18N_UNTRANSLATED_ARTICLES": policy},
         expect_warning=True,
     )
 
-    assert "I18N_UNTRANSLATED_ARTICLES is 'hide'" in log
-    # What the warning is about: the subsite-only articles drop out.
-    links = _read_feed(output / "feeds/all.atom.xml")["links"]
-    assert JA_TRAVEL not in links
-    assert EN_TECH not in links
+    assert "I18N_UNTRANSLATED_ARTICLES is 'hide' or unset" in log
+    # "hide" makes the main site's copy of a subsite-only article a draft:
+    # no page anywhere on the main site, so it is not in the feeds (and
+    # _build checked that no entry links to a missing page). Translations of
+    # main-site articles still go to their subsites.
+    assert _read_feed(output / "feeds/all.atom.xml")["links"] == [
+        *(ZH_REVIEW, EN_REVIEW, JA_REVIEW),
+        ZH_COOK,
+    ]
+    assert [path for path in _written_feeds(output) if path.startswith("feeds/")] == [
+        "feeds/all.atom.xml",
+        "feeds/cook.atom.xml",
+        "feeds/review.atom.xml",
+    ]
+
+
+def test_feed_urls_can_differ_from_paths(tmp_path: Path) -> None:
+    output, _ = _build(
+        tmp_path,
+        _every_kind_of_post,
+        {
+            "FEED_ALL_LANGUAGES_ATOM_URL": "all-languages/",
+            "CATEGORY_FEED_ALL_LANGUAGES_ATOM_URL": "all-languages/{slug}/",
+        },
+    )
+
+    feed = _read_feed(output / "feeds/all.atom.xml")
+    assert feed["self"] == f"{SITEURL}/all-languages/"
+    # Not under a kept prefix any more: the URL is the id.
+    assert feed["id"] == f"{SITEURL}/all-languages/"
+    assert feed["links"] == EXPECTED["feeds/all.atom.xml"]
+    review = _read_feed(output / "feeds/review.atom.xml")
+    assert review["self"] == f"{SITEURL}/all-languages/review/"
+    assert review["links"] == EXPECTED["feeds/review.atom.xml"]
+
+
+def test_feeds_follow_article_order_by(tmp_path: Path) -> None:
+    output, _ = _build(tmp_path, _every_kind_of_post, {"ARTICLE_ORDER_BY": "date"})
+
+    # Oldest first; the same-date review versions keep the site order.
+    assert _read_feed(output / "feeds/all.atom.xml")["links"] == [
+        *(ZH_COOK, EN_TECH, JA_TRAVEL),
+        *(ZH_REVIEW, EN_REVIEW, JA_REVIEW),
+    ]
 
 
 def test_kept_untranslated_articles_are_listed_once(tmp_path: Path) -> None:
@@ -527,6 +598,65 @@ def test_use_feed_url_as_id(context: dict[str, Any], url: str, expected: str) ->
 def test_register_connects_the_handlers() -> None:
     register()
 
-    # blinker keys function receivers by id().
-    assert id(write_feeds) in signals.article_writer_finalized.receivers
-    assert id(use_feed_url_as_id) in signals.feed_generated.receivers
+    assert write_feeds in signals.article_writer_finalized.receivers_for(object())
+    assert use_feed_url_as_id in signals.feed_generated.receivers_for(object())
+
+
+def test_feed_settings_copies_subsites_deeply() -> None:
+    subsites = {"ja": {"SITENAME": "JA", "DEFAULT_METADATA": {"lang": "zh-tw"}}}
+    result = feed_settings(
+        siteurl=SITEURL,
+        sitename="Test",
+        default_lang="zh-tw",
+        subsites=subsites,
+        language_names={},
+    )
+
+    result["I18N_SUBSITES"]["ja"]["DEFAULT_METADATA"]["lang"] = "ja"
+    assert subsites["ja"]["DEFAULT_METADATA"] == {"lang": "zh-tw"}
+
+
+def test_feed_settings_points_attilas_rss_names_at_the_feed() -> None:
+    social = (("Feed", "a"), ("rss-square", "b"), ("RSS", "c"), ("GitHub", "d"))
+    result = feed_settings(
+        siteurl=SITEURL,
+        sitename="Test",
+        default_lang="zh-tw",
+        subsites={},
+        language_names={},
+        social=social,
+    )
+
+    url = f"{SITEURL}/zh-tw/feeds/all.atom.xml"
+    assert result["SOCIAL"] == (
+        ("Feed", url),
+        ("rss-square", url),
+        ("RSS", url),
+        ("GitHub", "d"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"subsites": None}, TypeError, "subsites must be a mapping, not NoneType"),
+        ({"subsites": {"ja": None}}, TypeError, r"subsites\['ja'\] must be"),
+        ({"language_names": None}, TypeError, "language_names must be a mapping"),
+        ({"all_languages_labels": ["x"]}, TypeError, "all_languages_labels must"),
+        ({"social": (("RSS",),)}, ValueError, r"\(name, link\) pairs"),
+        ({"social": ("RSS",)}, ValueError, r"\(name, link\) pairs"),
+    ],
+)
+def test_feed_settings_rejects_bad_input(
+    kwargs: dict[str, Any], error: type[Exception], message: str
+) -> None:
+    arguments: dict[str, Any] = {
+        "siteurl": SITEURL,
+        "sitename": "Test",
+        "default_lang": "zh-tw",
+        "subsites": {},
+        "language_names": {},
+        **kwargs,
+    }
+    with pytest.raises(error, match=message):
+        feed_settings(**arguments)

@@ -15,13 +15,16 @@ main site's ``get_writer`` signal, and the last one rewrites the URLs of the
 removed articles to their subsite (``ja/...``) before any site writes a file.
 So when the main site writes these feeds, its own copies of those articles
 already link to the subsite. That requires
-``I18N_UNTRANSLATED_ARTICLES = "remove"`` (or ``"keep"``): ``"hide"`` — the
-plugin's default — turns them into hidden articles without a subsite URL, and
-they drop out of these feeds; the plugin logs a warning in that case.
+``I18N_UNTRANSLATED_ARTICLES = "remove"`` (or ``"keep"``). With ``"hide"`` —
+i18n_subsites' default — it turns the main site's copy of a subsite-only
+article into a draft, the original never gets a subsite URL, and the main site
+writes no page for it: those articles are left out of these feeds (the plugin
+logs a warning) rather than listed with a link to a page that does not exist.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
@@ -38,6 +41,8 @@ logger = logging.getLogger(__name__)
 
 FEED_SETTING = "FEED_ALL_LANGUAGES_ATOM"
 CATEGORY_FEED_SETTING = "CATEGORY_FEED_ALL_LANGUAGES_ATOM"
+# The SOCIAL names attila (3.5.0) shows as the header RSS icon.
+RSS_NAMES = ("rss", "rss-square", "feed")
 
 
 def is_subsite(settings: Mapping[str, Any]) -> bool:
@@ -56,6 +61,10 @@ def all_language_articles(generator: Any) -> list[Article]:
     items = list(generator.articles)
     for article in generator.articles:
         items.extend(article.translations)
+    # I18N_UNTRANSLATED_ARTICLES = "hide" moves a subsite-only article to the
+    # drafts as a new Draft object; the published original stays in
+    # generated_content without a subsite URL or a page, so skip it.
+    hidden = {draft.source_path for draft in getattr(generator, "drafts", ())}
     # generated_content also holds the articles i18n_subsites removed because
     # another subsite publishes them. Sort by path: files are read in no fixed
     # order, and articles with the same date keep the order they come in.
@@ -64,7 +73,9 @@ def all_language_articles(generator: Any) -> list[Article]:
             (
                 content
                 for content in generator.context["generated_content"].values()
-                if isinstance(content, Article) and content.status == "published"
+                if isinstance(content, Article)
+                and content.status == "published"
+                and content.source_path not in hidden
             ),
             key=attrgetter("source_path"),
         )
@@ -86,9 +97,10 @@ def _warn_on_hidden_articles(settings: Mapping[str, Any]) -> None:
         return
     if settings.get("I18N_UNTRANSLATED_ARTICLES", "hide") == "hide":
         logger.warning(
-            "i18n_feeds: I18N_UNTRANSLATED_ARTICLES is 'hide' (i18n_subsites' "
-            "default); articles that only exist in a subsite language are left "
-            "out of %s. Set it to 'remove' or 'keep'.",
+            "i18n_feeds: I18N_UNTRANSLATED_ARTICLES is 'hide' or unset "
+            "(i18n_subsites defaults to 'hide'), so articles that only exist in "
+            "a subsite language are not in %s. Set it to 'remove' (or 'keep') "
+            "to include them.",
             FEED_SETTING,
         )
 
@@ -149,6 +161,9 @@ def _with_rss(
     social: Sequence[Sequence[str]], url: str, rss_names: Iterable[str]
 ) -> tuple[tuple[str, str], ...]:
     names = {name.lower() for name in rss_names}
+    for entry in social:
+        if isinstance(entry, str) or len(entry) != 2:
+            raise ValueError(f"SOCIAL entries must be (name, link) pairs: {entry!r}")
     return tuple(
         (name, url if name.lower() in names else link) for name, link in social
     )
@@ -166,7 +181,7 @@ def feed_settings(
     feed_path: str = "feeds/all.atom.xml",
     category_feed_path: str = "feeds/{slug}.atom.xml",
     separator: str = " — ",
-    rss_names: Iterable[str] = ("rss",),
+    rss_names: Iterable[str] = RSS_NAMES,
 ) -> dict[str, Any]:
     """Return the publish settings for one feed per language plus all languages.
 
@@ -177,9 +192,19 @@ def feed_settings(
         <lang>/feeds/all.atom.xml, .../{slug}...           each subsite
 
     The result holds the main site's settings plus a new ``I18N_SUBSITES``
-    (``subsites`` is not modified) whose entries gain each subsite's feed
-    settings, and ``SOCIAL`` when ``social`` is given. Unpack it into the
-    settings module, e.g. ``globals().update(feed_settings(...))``.
+    whose entries gain each subsite's feed settings, and ``SOCIAL`` when
+    ``social`` is given. The subsite entries are deep copies: changing the
+    result never changes ``subsites`` and the other way round. Unpack it into
+    the settings module after ``from pelicanconf import *``, e.g.
+    ``globals().update(feed_settings(...))``; that replaces the module's
+    ``FEED_ALL_ATOM``, ``FEED_ATOM``, ``CATEGORY_FEED_ATOM``,
+    ``FEED_LINK_TITLES``, ``FEED_EXTRA_LINKS``, ``I18N_SUBSITES`` and (with
+    ``social``) ``SOCIAL``.
+
+    In each subsite entry, ``FEED_DOMAIN``, ``FEED_ATOM``,
+    ``CATEGORY_FEED_ATOM``, ``FEED_LINK_TITLES``, ``FEED_EXTRA_LINKS`` and
+    (with ``social``) ``SOCIAL`` replace the subsite's own values: they are
+    what this layout is made of. Set them after the call to change one.
 
     Each site gets ``FEED_LINK_TITLES`` (its language feed and category feeds)
     and ``FEED_EXTRA_LINKS`` (the all-language feed) in the shape attila
@@ -202,8 +227,28 @@ def feed_settings(
         feed_path: Path of a site feed, relative to the site root.
         category_feed_path: Path of a category feed, with ``{slug}``.
         separator: Joins the parts of a feed title.
-        rss_names: ``SOCIAL`` entry names that link to the feed.
+        rss_names: ``SOCIAL`` entry names that link to the feed
+            (case-insensitive; default: attila's ``rss``, ``rss-square``,
+            ``feed``).
+
+    Raises:
+        TypeError: ``subsites``, ``language_names`` or ``all_languages_labels``
+            is not a mapping, or a ``subsites`` entry is not a mapping.
+        ValueError: ``default_lang`` is a subsite, or a ``SOCIAL`` entry is
+            not a ``(name, link)`` pair.
     """
+    for name, value in (
+        ("subsites", subsites),
+        ("language_names", language_names),
+        ("all_languages_labels", all_languages_labels or {}),
+    ):
+        if not isinstance(value, Mapping):
+            raise TypeError(f"{name} must be a mapping, not {type(value).__name__}")
+    for lang, overrides in subsites.items():
+        if not isinstance(overrides, Mapping):
+            raise TypeError(
+                f"subsites[{lang!r}] must be a mapping, not {type(overrides).__name__}"
+            )
     if default_lang in subsites:
         raise ValueError(f"default_lang {default_lang!r} is also a subsite")
     siteurl = siteurl.rstrip("/")
@@ -232,7 +277,7 @@ def feed_settings(
     new_subsites: dict[str, dict[str, Any]] = {}
     for lang, overrides in subsites.items():
         site = {
-            **overrides,
+            **copy.deepcopy(dict(overrides)),
             # Pelican derives FEED_DOMAIN from the main SITEURL before the
             # subsite exists, so feed links and self links would miss /<lang>/.
             "FEED_DOMAIN": site_urls[lang],
