@@ -44,7 +44,7 @@ It depends on `pelican>=4.7` and `pelican-i18n-subsites>=0.9.0`.
 
 ### 1. Add to pelicanconf.py
 
-Load it after `i18n_subsites`:
+Both plugins must be listed; their order does not matter (they hook different signals):
 
 ```python
 PLUGINS = ["pelican.plugins.i18n_subsites", "pelican.plugins.i18n_feeds"]
@@ -98,7 +98,22 @@ Result (default paths):
 | `zh-tw/feeds/all.atom.xml`, `zh-tw/feeds/{slug}.atom.xml` | main language |
 | `en/feeds/...`, `ja/feeds/...` | that subsite's language |
 
-`feed_settings()` returns a dict, so you can also assign the keys you want one by one instead of `globals().update(...)`. It never modifies the `I18N_SUBSITES` you pass in; it returns a new one.
+Notes on `feed_settings()`:
+
+- Call `globals().update(...)` **after** `from pelicanconf import *`: it replaces the module's `FEED_ALL_ATOM`, `FEED_ATOM`, `CATEGORY_FEED_ATOM`, `FEED_ALL_LANGUAGES_ATOM`, `CATEGORY_FEED_ALL_LANGUAGES_ATOM`, `FEED_LINK_TITLES`, `FEED_EXTRA_LINKS`, `I18N_FEEDS_URLS`, `I18N_FEEDS_ALL_LANGUAGES_URL`, `I18N_SUBSITES` and, with `social=`, `SOCIAL`. Set any of them again after the call to override it.
+- In each subsite entry, it **replaces** the subsite's own `FEED_DOMAIN`, `FEED_ATOM`, `CATEGORY_FEED_ATOM`, `FEED_LINK_TITLES`, `FEED_EXTRA_LINKS` (and `SOCIAL` with `social=`): they are what the layout is made of. Change `I18N_SUBSITES[lang][...]` after the call if one subsite needs something else.
+- It returns a new `I18N_SUBSITES` built from deep copies of your entries, so the result and the `I18N_SUBSITES` you passed in share no mutable objects.
+- It raises `TypeError` when `subsites`, an entry of it, `language_names` or `all_languages_labels` is not a mapping, and `ValueError` when `default_lang` is also a subsite or a `SOCIAL` entry is not a `(name, link)` pair.
+- You can also assign the keys you want one by one instead of `globals().update(...)`.
+
+### Migrating from the entertainment-blog local plugin
+
+The local `all_language_feeds` plugin always rewrote feed ids. Here that is opt-in, so to keep the same output set both:
+
+```python
+I18N_FEEDS_URL_AS_ID = True
+I18N_FEEDS_KEEP_ID_PREFIXES = ["feeds/"]
+```
 
 ## Configuration
 
@@ -129,7 +144,7 @@ The all-language feeds are written by the main site only: a site whose `DEFAULT_
 | `feed_path` | `"feeds/all.atom.xml"` | Site feed path, relative to each site root. |
 | `category_feed_path` | `"feeds/{slug}.atom.xml"` | Category feed path. |
 | `separator` | `" — "` | Joins the parts of a feed title. |
-| `rss_names` | `("rss",)` | `SOCIAL` names (case-insensitive) that are the RSS link. |
+| `rss_names` | `("rss", "rss-square", "feed")` | `SOCIAL` names (case-insensitive) that are the RSS link; the default is the list attila shows as its RSS icon. |
 
 It returns these settings for the main site, and the same per-site keys inside each `I18N_SUBSITES` entry:
 
@@ -161,7 +176,7 @@ The plugin does not depend on any theme. Themes that render `FEED_DOMAIN` + `FEE
 ## Known limitations
 
 - **Atom only.** There are no RSS variants of the all-language feeds, and no all-language tag or author feeds.
-- **`I18N_UNTRANSLATED_ARTICLES` must be `"remove"` or `"keep"`.** With `"hide"` — `i18n_subsites`' default — subsite-only articles become hidden articles without a subsite URL and drop out of the all-language feeds. The plugin logs a warning in that case.
+- **Set `I18N_UNTRANSLATED_ARTICLES` to `"remove"` (or `"keep"`).** With `"hide"` or unset (`i18n_subsites` defaults to `"hide"`), `i18n_subsites` turns the main site's copy of each subsite-only article into a draft and the main site writes no page for it, so the all-language feeds leave those articles out (translations of main-site articles are still listed) and the plugin logs a warning. `"keep"` lists them with their main-site URL (`ARTICLE_LANG_URL`).
 - **Relies on `i18n_subsites` internals.** It expects `i18n_subsites` to build the subsites from the main site's `get_writer` signal and to rewrite the removed articles' URLs before any site writes (true for 0.9.0 and 1.0.0). See [how it works](docs/how-it-works.md).
 - **Feed `<id>` changes are opt-in.** Turning on `I18N_FEEDS_URL_AS_ID` changes the id of existing feeds not covered by `I18N_FEEDS_KEEP_ID_PREFIXES`; most readers key on the feed URL, but some may treat the feed as new.
 - With three or more languages, an article translated into some but not all subsite languages makes Pelican warn about "2 original items" on the subsites lacking it. That is Pelican's translation grouping, not this plugin; mark the non-original versions with `Translation: true` to silence it.

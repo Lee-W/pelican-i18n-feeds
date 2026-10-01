@@ -30,8 +30,9 @@ state with the subsite builds.
 1. the main site's articles,
 2. their translations (Pelican's `FEED_ALL_ATOM` order),
 3. the published `Article` objects of `generated_content` — the ones only a
-   subsite publishes — sorted by source path, because files are read in no
-   fixed order and same-date articles keep the order they come in,
+   subsite publishes — except those whose source path is in the generator's
+   drafts (see `"hide"` below), sorted by source path, because files are
+   read in no fixed order and same-date articles keep the order they come in,
 
 then orders them with `ARTICLE_ORDER_BY`. Drafts, hidden articles and pages
 are never included. Pelican's writer cuts each feed at `FEED_MAX_ITEMS`.
@@ -50,7 +51,7 @@ another copy.
 | --- | --- |
 | `"remove"` | Works: removed articles keep a subsite URL. |
 | `"keep"` | Works: other-language articles stay on the main site (and link there); each is listed once. |
-| `"hide"` (default) | Subsite-only articles become hidden articles and are left out. The plugin logs a warning. |
+| `"hide"` or unset (i18n_subsites' default) | i18n_subsites moves a new `Draft` copy of each subsite-only article to the main site's drafts; the published original stays in `generated_content` with no subsite URL and no page. The plugin skips articles whose source path is in `generator.drafts`, so they are left out instead of being listed with a dead link. Translations of main-site articles are unaffected. The plugin logs a warning. |
 
 ## Feed `<id>`
 
